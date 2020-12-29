@@ -6,6 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from collections import deque
+
 # if gpu is to be used
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -28,15 +30,23 @@ class ReplayMemory(object):
     # ReplayMemory should store the last "size" experiences
     # and be able to return a randomly sampled batch of experiences
     def __init__(self, size):
-        pass
+        self.buffer = deque(maxlen=size)
 
     # Store experience in memory
     def store_experience(self, prev_obs, action, observation, reward, done):
-        pass
+        experience = (prev_obs, action, observation, reward, done)
+        self.buffer.append(experience)
 
     # Randomly sample "batch_size" experiences from the memory and return them
     def sample_batch(self, batch_size):
-        pass
+        buf_size = len(self.buffer)
+        idxs = np.random.choice(np.arange(buf_size),  # mask
+                                size=batch_size,
+                                replace=False
+                                )
+        obs, actions, next_obs, rewards, dones = map(lambda x: torch.tensor(x, device=device).float(),
+                                                     zip(*[self.buffer[i] for i in idxs]))
+        return obs, actions.long(), next_obs, rewards, dones
 
 
 # DEBUG=True
@@ -72,7 +82,7 @@ class QNet(nn.Module):
             v, _ = Qs.max(dim=1)
         else:
             v = Qs.max()
-        v = v.detach().numpy()
+        v = v.detach()  # .numpy()
         # print ("... Vs: %s" % v)
         return v
 
@@ -82,7 +92,7 @@ class QNet(nn.Module):
         t_Qs = self.forward(observation)  # <- this should feed in the input
 
         # instead:
-        Qs = t_Qs.detach().numpy()
+        Qs = t_Qs.detach().cpu().numpy()
         if DEBUG:
             print("argmax_Q_value: Qs: %s" % Qs)
         m = np.random.choice(np.flatnonzero(Qs == Qs.max()))
@@ -98,7 +108,7 @@ class QNet(nn.Module):
 
         return q
 
-    def single_Q_update(self, prev_observation, action, observation, reward, done):
+    def single_Q_update(self, target_qn, prev_observation, action, observation, reward, done):
         """ action and observation need to be in the format that QNet was constructed for.
             I.e., if observation is a discrete variable (with say N values=states), but QNet
             is working on one-hot vectors (of length N), then observation needs to be such a
@@ -112,7 +122,7 @@ class QNet(nn.Module):
         if done:
             future_val = 0  # XXX<- needs to be a 0-tensor?
         else:
-            future_val = self.max_Q_value(t_observation)  ##<<- this evaluates the QNet
+            future_val = target_qn.max_Q_value(t_observation)  ##<<- this evaluates the QNet
         # We just evaluated the Qnet for the next-stage variables, but of course... the effect of the Qnet
         # parameters on the *next-stage* value is ignored by Q-learning.
         # So... we need to reset the gradients. (otherwise they accumulate e.g., see;
@@ -124,7 +134,7 @@ class QNet(nn.Module):
 
         # I suppose this could be parallelized when making it torch:
         target = reward + self.discount * future_val
-        td = target - t_predict.detach().numpy()
+        td = target - t_predict.detach()  # .numpy()
 
         # now update all the parameters
         for param in self.parameters():
@@ -133,24 +143,25 @@ class QNet(nn.Module):
 
         self.zero_grad()
 
-        predict = t_predict.detach().numpy()
-        new_q = self.get_Q(t_prev_obs, action).detach().numpy()
+        predict = t_predict.detach()  # .numpy()
+        new_q = self.get_Q(t_prev_obs, action).detach()  # .numpy()
         self.zero_grad()
 
-        debug_utils.debug_q_update(prev_observation, action, observation, reward, done, predict, self.discount, future_val,
+        debug_utils.debug_q_update(prev_observation, action, observation, reward, done, predict, self.discount,
+                                   future_val,
                                    target, td, new_q)
 
-    def batch_Q_update(self, obs, actions, next_obs, rewards, dones):
+    def batch_Q_update(self, target_qn, obs, actions, next_obs, rewards, dones):
 
         batch_size = len(dones)
-        v_next_obs = self.max_Q_value(next_obs, batch_size)
+        v_next_obs = target_qn.max_Q_value(next_obs, batch_size)
         not_dones = 1 - dones
         fut_values = self.discount * v_next_obs * not_dones
         targets = rewards + fut_values
 
         self.zero_grad()
         q_pred = self.get_Q(obs, actions, batch_size)
-        loss = self.loss_fn(q_pred, torch.tensor(targets, dtype=torch.float))
+        loss = self.loss_fn(q_pred, targets.clone().detach().float())
         if DEBUG:
             print("q_pred:    %s" % q_pred)
             print("loss:      %s" % loss.item())
@@ -173,9 +184,9 @@ class QNet_MLP(QNet):
         ### MLP
         HIDDEN_NODES1 = 150
         HIDDEN_NODES2 = 120
-        self.fc1 = nn.Linear(num_in, HIDDEN_NODES1)  # 6*6 from image dimension
-        self.fc2 = nn.Linear(HIDDEN_NODES1, HIDDEN_NODES2)
-        self.fc3 = nn.Linear(HIDDEN_NODES2, num_a)  # 4 outputs, the Q-values for the 4 actions
+        self.fc1 = nn.Linear(num_in, HIDDEN_NODES1).to(device)  # 6*6 from image dimension
+        self.fc2 = nn.Linear(HIDDEN_NODES1, HIDDEN_NODES2).to(device)
+        self.fc3 = nn.Linear(HIDDEN_NODES2, num_a).to(device)  # 4 outputs, the Q-values for the 4 actions
 
         nn.init.xavier_uniform_(self.fc1.weight)
         nn.init.xavier_uniform_(self.fc2.weight)
@@ -185,6 +196,7 @@ class QNet_MLP(QNet):
         """ This assumes x to be a tensor """
         debug_utils.assert_isinstance(x, torch.Tensor)
         ### MLP:
+        x = x.to(device)
         x = F.leaky_relu(self.fc1(x))
         x = F.leaky_relu(self.fc2(x))
         x = self.fc3(x)
@@ -193,9 +205,10 @@ class QNet_MLP(QNet):
 
 
 class QLearner(object):
-    def __init__(self, env, q_function, discount=DEFAULT_DISCOUNT, rm_size=RMSIZE):
+    def __init__(self, env, q_function, target_qnn=None, discount=DEFAULT_DISCOUNT, rm_size=RMSIZE):
         self.env = env
         self.Q = q_function
+        self.target_qnn = target_qnn
         self.rm = ReplayMemory(rm_size)  # replay memory stores (a subset of) experience across episode
         self.discount = discount
 
@@ -221,21 +234,23 @@ class QLearner(object):
         self.stage = 0  # reset the time step, or 'stage' in this episode
         self.episode += 1
         if self.epsilon > self.epsilon_min:
-            self.epsilon *= self.epsilon_decay # Decay epsilon
+            self.epsilon *= self.epsilon_decay  # Decay epsilon
 
     def process_experience(self, action, observation, reward, done):
         prev_obs = self.last_obs
         self.cum_r += reward
         self.dis_r += reward * (self.discount ** self.stage)
         self.stage += 1
-        self.Q.single_Q_update(prev_obs, action, observation, reward, done)
+        self.Q.single_Q_update(self.target_qnn, prev_obs, action, observation, reward, done)
+
         self.last_obs = observation
 
         # TODO coding exercise 1: Do a batch update using experience stored in the replay memory
-        # if self.tot_stages > 10 * self.batch_size:
-            # sample a batch of batch_size from the replay memory
-            # and update the network using this batch (batch_Q_update)
-
+        if self.tot_stages > 10 * self.batch_size:
+            obs, actions, next_obs, rewards, dones = self.rm.sample_batch(self.batch_size)
+            self.Q.batch_Q_update(self.target_qnn, obs, actions, next_obs, rewards, dones)
+        # sample a batch of batch_size from the replay memory
+        # and update the network using this batch (batch_Q_update)
 
     def select_action(self, obs):
         """select an action based in self.last_obs
