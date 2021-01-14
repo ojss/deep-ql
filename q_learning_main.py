@@ -2,6 +2,7 @@ import simple_grid
 from q_learning_skeleton import *
 import gym
 
+
 def act_loop(env, agent, num_episodes):
     for episode in range(num_episodes):
         state = env.reset()
@@ -12,47 +13,47 @@ def act_loop(env, agent, num_episodes):
             renderit = True
 
         for t in range(MAX_EPISODE_LENGTH):
-            if renderit:
-                env.render()
-            printing=False
+            # if renderit:
+            #     env.render()
+            printing = False
             if t % 500 == 499:
                 printing = True
 
-            if printing:
-                print('---stage %d---' % t)
-                agent.report()
-                print("state:", state)
+            # if printing:
+            #     print('---stage %d---' % t)
+            #     agent.report()
+            #     print("state:", state)
 
             action = agent.select_action(state)
             new_state, reward, done, info = env.step(action)
-            if printing:
-                print("act:", action)
-                print("reward=%s" % reward)
+            # if printing:
+            #     print("act:", action)
+            #     print("reward=%s" % reward)
 
             agent.process_experience(state, action, new_state, reward, done)
             state = new_state
             if done:
-                print("Episode finished after {} timesteps".format(t+1))
+                print("Episode finished after {} timesteps".format(t + 1))
                 env.render()
                 agent.report()
                 break
-
+    print(agent.qtable)
+    policy = {}
+    directions = {0: "LEFT", 1: "DOWN", 2: "RIGHT", 3: "UP"}
+    for key in agent.qtable:
+        policy[key] = directions[agent.qtable[key].index(max(agent.qtable[key]))]
+    print(policy)
     env.close()
 
 
 if __name__ == "__main__":
-    env = simple_grid.DrunkenWalkEnv(map_name="walkInThePark")
-    # env = simple_grid.DrunkenWalkEnv(map_name="theAlley")
+    # env = simple_grid.DrunkenWalkEnv(map_name="walkInThePark")
+    env = simple_grid.DrunkenWalkEnv(map_name="theAlley")
     num_a = env.action_space.n
-
-    if (type(env.observation_space)  == gym.spaces.discrete.Discrete):
+    if (type(env.observation_space) == gym.spaces.discrete.Discrete):
         num_o = env.observation_space.n
     else:
-        raise("Qtable only works for discrete observations")
+        raise ("Qtable only works for discrete observations")
 
-
-    discount = DEFAULT_DISCOUNT
-    ql = QLearner(num_o, num_a, discount) #<- QTable
+    ql = QLearner(num_o, num_a)  # <- QTable
     act_loop(env, ql, NUM_EPISODES)
-
-
